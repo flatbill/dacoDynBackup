@@ -1,0 +1,66 @@
+// scan a dynamoDb table and pass back json output to the caller.
+// json will be an array of  recs in the dynamoDb table under key 'Items:'
+// with database fields names like 'contentId'.
+// Caller will pass in querystring like TableName=dacoContent.
+// Caller can pass in a GET method but we really dont care.
+// in other words, we don't do table updates in this program.
+// any method will result in a dynamo table scan.
+// the results of the scan will be passed back to the caller,
+// but first, this program will adjust the JSON object.
+//  dynamo scan contains extra results like Count and ScannedCount.
+// we could change the .scan parameters to not give these count results,
+// but it is more fun and educational to delete from the .scan result.
+// =====
+// the callback looks weird, but supposedly it is std node js.
+// not sure what would ever set err.message.
+// adds more confusion with the weird if-else baked into javscript as ? and :
+// when building the http response of  statusCode, body, headers.
+const doc = require('dynamodb-doc');
+const dynamo = new doc.DynamoDB();
+// const jsonHeadersObj = { 'Content-Type': 'application/json' };
+const jsonHeadersObj = { 
+    'Content-Type': 'application/json',
+     'Access-Control-Allow-Origin': '*'
+};
+
+let tableNameIn = '?';
+
+exports.handler = (event1, context, stdNodeCallback1) => {
+    let doneScan = (err, scanRes) => stdNodeCallback1(
+         // this is  what gets run AFTER scan finishes.
+        null, 
+        { //start http response object definition. ?: is like If Else
+          statusCode: err ? '400' : '200',  
+          body: err ? err.message : JSON.stringify(adjustObj(scanRes)),
+          headers: jsonHeadersObj
+        } //end http response object definition
+    ); //end of stdNodeCallback1
+   // caller should pass in querystring of TableName tableName or tableName
+   // like tablename=dacoContent
+    tableNameIn = event1.queryStringParameters.TableName;
+   if (tableNameIn == null){tableNameIn = event1.queryStringParameters.tableName}
+   if (tableNameIn == null){tableNameIn = event1.queryStringParameters.tablename}
+   let scanParmsObj = { TableName: tableNameIn };
+   dynamo.scan(scanParmsObj, doneScan); //doneScan is the callback func, runs after the data is fetched.
+}; //end of exports.handler
+
+
+function adjustObj(scanResObj) {
+  // adjust the object.  remove or add values to the scan result.
+  // this func takes the input parm, adjusts it, and returns it.
+  delete scanResObj.ScannedCount;
+  delete scanResObj.Count;
+  scanResObj.TableName = tableNameIn;
+  //scanResObj.dacoMessage3 = tableNameIn;
+  //scanResObj.dacoMessage2 = scanResObj.Items[0].contentId;
+  //scanResObj.Items[1].contentId = '301';
+  scanResObj.DacoMessage1 = 'end of daco fetch.'
+  return scanResObj;
+}
+
+// can you see where the async processes run or wait? 
+// will exports.handler return a promise to the caller, or will he wait?
+// will doneHandler return a promise or wait til done?
+// who is waiting for who?
+// can you put some timers and text in this program to tell for sure?
+

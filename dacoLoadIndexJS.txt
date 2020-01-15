@@ -1,0 +1,226 @@
+// dacoTableLoad mass add and update to one of four dynamoDb daco tables.
+// Selzer Start Dec 2019  Created this api lambda program dacoTableLoad.
+// Selzer Change Jan 2019 bla bla bla
+// caller will call with http PUT method.
+// caller will pass in querystring like TableName=dacoFormat
+// caller will pass in an http request object (the Items the caller wants to upsert)
+// caller will pass in request object as {"Items" : [  {bla},{bla},{bla} ]  }
+// caller will pass in an array where one array row resembles one dynamodb row.
+// caller must have some knowledge of the fields of the dynamodb table,
+// so that he can specify fields in his request.body.
+// this pgm does not do deletes.  
+// you might want to delete all recs on the table before you run this program.
+// caller beware: multiField keys are a problem in dynamoDb,
+// so this pgm will re-format the items when calling dynamodb putItem --
+// this pgm will generate a composite key field for two of the four tables:
+// dacoFormatDetail  and dacoSkuLayerFormat. 
+// this program generates the composite key for those two tables, 
+// using the caller's passed-in request body fields.
+// this program is designed for an occasional mass load.
+// this program is not designed as a public api.
+// as of Dec 2019, this program has not yet been tested for many records.
+// if we max out with dynamo db or api gateway, then you might have to call
+// this program multiple times with different sets of input.
+const doc = require('dynamodb-doc');
+const dynamo = new doc.DynamoDB();
+//  ////////////////////////////////////////////////////////////////////////
+//  ////////////////////////////////////////////////////////////////////////
+exports.handler = async (event) => {
+  // global-ish variables here.  someday, i'll be wise enough to write pure functions.
+  let handlerResponse = '?'   // tell the caller what we did
+  let reqBody = {}      //JSON.parse(event.body); //caller must pass-in a formatted request body
+  let reqBodyCount = 0  //reqBody.Items.length
+  let tableNameIn = '?' //event.queryStringParameters.TableName
+  let reqBodyItemsRow = {}
+  let dynamoPutParams = {}
+  let dynamoPutHelper = {}
+  let datafromResolvedPromise = {}
+  let dynPutCount = 0
+  let msgOut = ''
+  let errMsg = ''
+  let nullList = [null, undefined, '']
+  // ///////////////////////////////////////
+  validateReqStr() // first pass at request body validation, before trying deeper validation
+  if (! errMsg > ''){validateReq()} // deeper validation of request body. sets errMsg if invalid request
+  if (errMsg > '') {return {statusCode: 400, body: JSON.stringify({ message: errMsg }) }}
+  // req body and querystring validations have passed.
+  // ///////////////////////////////////////
+  tableNameIn = event.queryStringParameters.TableName
+  reqBody = JSON.parse(event.body); 
+  reqBodyCount = reqBody.Items.length
+  try {
+      let i = 0 
+      for (i = 0; i < reqBodyCount; i++) {
+      buildDynamoPutParams(i)
+      datafromResolvedPromise = await dynamo.putItem(dynamoPutParams).promise();
+      dynPutCount = dynPutCount + 1
+      } // end of for loop  (loops once for every item in the request body)
+  }
+  catch (err) { //dynamodb is giving us an error. words from dynamdb in .message
+      // this pgm is quitting now.  return to caller.
+      msgOut = 'error caught by dynamoDb. ' + err.message
+      handlerResponse = {statusCode: 400, body: JSON.stringify({ message: msgOut }) }
+      return handlerResponse
+  }
+  msgOut = 'dynamoDb msg=' + JSON.stringify(datafromResolvedPromise) + ' putCount= ' + dynPutCount
+  // dynamo putItem gives us blank data upon success, 
+  // so datafromResolvedPromise will likely be blank
+  handlerResponse = 
+    {statusCode: 200, body: JSON.stringify({ message: msgOut }) }
+  return handlerResponse
+  // done with this program, return to caller
+  //  ////////////////////////////////////////////////////////////////////////
+  //  ////////////////////////////////////////////////////////////////////////
+  function buildDynamoPutParams(i){
+      // this function sets object dynamoPutParams
+      // caller of this func should pass in i (an index of the request body array)
+      // dynamoDB needs us to set params that we will use when we do a putItem
+      // params are for the fields and the table that we will put.
+      reqBodyItemsRow = { Item: reqBody.Items[i]  };
+      if (tableNameIn == 'dacoSkuLayerFormat') {  //set composite Key for this table
+        reqBodyItemsRow.Item.sku_layer_formatKey = 
+          reqBodyItemsRow.Item.sku + '_' 
+          + reqBodyItemsRow.Item.layer + '_' 
+          + reqBodyItemsRow.Item.formatKey
+      }
+      if (tableNameIn == 'dacoFormatDetail') {//set composite Key for this table
+       reqBodyItemsRow.Item.formatKey_row_rowSlot = 
+         reqBodyItemsRow.Item.formatKey + '_' 
+         + reqBodyItemsRow.Item.row + '_' 
+         + reqBodyItemsRow.Item.rowSlot
+      }
+      dynamoPutHelper = { TableName: event.queryStringParameters.TableName }
+      dynamoPutParams = Object.assign({}, reqBodyItemsRow, dynamoPutHelper);
+  } // end formatDynamoPutParms
+  //  ////////////////////////////////////////////////////////////////////////
+  
+  function validateReq() {
+    // caller passed-in a request body.  Let's make sure it's good.
+    // dear programmer, you will have to mod this section if you ever change
+    // the dynamo db table layouts.
+    // has caller passed-in a querystring?
+    if (  nullList.includes(event.queryStringParameters) ){
+        errMsg='you did not pass-in a good querystring.'
+        return
+    }
+    // has caller passed-in TableName in querystring?
+    if (  nullList.includes(event.queryStringParameters.TableName) ){
+        errMsg='querystring parameter: TableName was not passed-in'
+        return
+    }
+    // has caller passed-in one of the four daco tables in TableName in querystring?
+    let goodTableNamesArr = 
+      ['dacoFormatDetail','dacoSkuLayerFormat','dacoFormat','dacoContent']
+    if (! goodTableNamesArr.includes(event.queryStringParameters.TableName)){
+      errMsg='you passed-in a bad querystring parameter value for TableName. Try '
+            + goodTableNamesArr
+      return
+    } 
+    // has caller passed-in a non-empty request body?
+     if (  nullList.includes(event.body) ){
+        errMsg='you did not pass-in a request body.'
+        return
+    }
+    // has caller passed-in Items ?
+     if (  nullList.includes(JSON.parse(event.body).Items) ) {
+        errMsg='you did not pass-in request body with Items.'
+        return
+     }
+    let i = 0 
+    for (i = 0; i < JSON.parse(event.body).Items.length; i++) {
+        if (errMsg == '') {validateOneReqItem(i) }
+    }
+  } // end of validateReq
+  function validateOneReqItem(i){
+    // this is a mass load program, which means we want the caller to pass-in every field.
+    if (event.queryStringParameters.TableName == 'dacoSkuLayerFormat' &&
+         ( nullList.includes(JSON.parse(event.body).Items[i].sku)   ||
+           nullList.includes(JSON.parse(event.body).Items[i].layer) ||
+           nullList.includes(JSON.parse(event.body).Items[i].formatKey ))) {
+             errMsg='you did not pass-in required fields for tableName: ' 
+             + event.queryStringParameters.TableName
+             + '. Try sku, layer, formatKey.' 
+             + ' Your bad request item is array entry ' + i
+             return
+    }
+   if (event.queryStringParameters.TableName == 'dacoFormat' &&
+         ( nullList.includes(JSON.parse(event.body).Items[i].formatName) ||
+           nullList.includes(JSON.parse(event.body).Items[i].formatKey ))) {
+             errMsg='you did not pass-in required fields for tableName: ' 
+             + event.queryStringParameters.TableName
+             + '. Try formatKey, formatName.'
+             + ' Your bad request Item is array entry ' + i
+             return
+    }
+    if (event.queryStringParameters.TableName == 'dacoFormatDetail' &&
+         ( nullList.includes(JSON.parse(event.body).Items[i].formatKey) ||
+           nullList.includes(JSON.parse(event.body).Items[i].row) ||
+           nullList.includes(JSON.parse(event.body).Items[i].rowSlot) ||
+           nullList.includes(JSON.parse(event.body).Items[i].contentName) ||
+           nullList.includes(JSON.parse(event.body).Items[i].mask ))) {
+             errMsg='you did not pass-in required fields for tableName: ' 
+             + event.queryStringParameters.TableName
+             + '. Try formatKey, row, rowSlot, contentName, mask.'
+             + ' Your bad request Item is array entry ' + i
+             return
+    }
+    if (event.queryStringParameters.TableName == 'dacoContent' &&
+         ( nullList.includes(JSON.parse(event.body).Items[i].contentId) ||
+           nullList.includes(JSON.parse(event.body).Items[i].contentName ))) {
+           errMsg='you did not pass-in required fields for tableName: ' 
+             + event.queryStringParameters.TableName
+             + '. Try contentId, contentName.'
+             + ' Your bad request Item is array entry ' + i
+            return
+    }
+    
+    // validate the passed-in items field names are 
+    // really fields we want on the table.
+    let propsForOneItemArr = Object.keys(JSON.parse(event.body).Items[i])
+    let j = 0
+    for (j = 0; j < propsForOneItemArr.length; j++) {
+        if (errMsg == '') { 
+            checkOneItemProps( propsForOneItemArr[j], i )
+        }
+    }
+  } // end validateOneReqItem
+  function checkOneItemProps(oneProp, indexFromReqBody){
+    let goodFieldNamesArr = [] 
+    if (event.queryStringParameters.TableName == 'dacoSkuLayerFormat') {  
+        goodFieldNamesArr = ['sku','layer','formatKey'] 
+    }
+    if (event.queryStringParameters.TableName == 'dacoContent') {  
+        goodFieldNamesArr = ['contentName','contentId'] 
+    }
+    if (event.queryStringParameters.TableName == 'dacoFormat') {  
+        goodFieldNamesArr = ['formatKey','formatName'] 
+    }
+    if (event.queryStringParameters.TableName == 'dacoFormatDetail') {  
+        goodFieldNamesArr = ['formatKey','contentName','row','rowSlot','mask'] 
+    }
+    if (! goodFieldNamesArr.includes(oneProp)) {
+        errMsg = ' Extra property: ' + oneProp 
+               + ' for table: ' + event.queryStringParameters.TableName 
+               + '. Bad request item: ' + indexFromReqBody
+    }
+  } // end of checkOneProp
+  //  test for a valid JSON string (looks at request body)
+  function validateReqStr() {
+    if (event.body  == null ) {
+        errMsg = 'You must pass-in request body in your http request.'
+        return 
+    }
+    try {
+        JSON.parse(event.body)
+    } catch (e) {
+        errMsg = 'you must pass-in request body as a JSON string.'
+        return 
+    }
+    if (! Array.isArray(JSON.parse(event.body).Items )) {
+         errMsg = 'request body needs an array of Items'
+         return
+    }
+    return 
+  } // end validateReqStr
+ 
+}; //end exports.handler
